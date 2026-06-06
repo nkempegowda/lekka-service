@@ -1,0 +1,43 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo "Logging in to Amazon ECR..."
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - REPOSITORY_NAME="lekka-service"
+      - IMAGE_REPO_NAME=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$REPOSITORY_NAME
+      - IMAGE_TAG=${CODEBUILD_RESOLVED_SOURCE_VERSION}
+
+  build:
+    commands:
+      - echo "Building Maven project..."
+      - mvn clean package -DskipTests
+      - echo "Building Docker image..."
+      - docker build -t $IMAGE_REPO_NAME:$IMAGE_TAG .
+      - docker tag $IMAGE_REPO_NAME:$IMAGE_TAG $IMAGE_REPO_NAME:latest
+      - echo "Pushing Docker image to ECR..."
+      - docker push $IMAGE_REPO_NAME:$IMAGE_TAG
+      - docker push $IMAGE_REPO_NAME:latest
+      - printf '[{"name":"lekka-service","imageUri":"%s"}]' $IMAGE_REPO_NAME:$IMAGE_TAG > imagedefinitions.json
+
+  post_build:
+    commands:
+      - echo "Build completed successfully"
+
+artifacts:
+  files:
+    - imagedefinitions.json
+    - helm/**/*
+    - pom.xml
+    - Dockerfile
+  name: BuildArtifact
+
+cache:
+  paths:
+    - '/root/.m2/**/*'
+
+env:
+  variables:
+    AWS_ACCOUNT_ID: "272495907167"
+    AWS_DEFAULT_REGION: "us-east-1"

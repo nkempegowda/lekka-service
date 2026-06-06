@@ -1,0 +1,767 @@
+.git
+.gitignore
+.DS_Store
+.idea
+*.iml
+*.iws
+*.ipr
+target/
+node_modules/
+npm-debug.log
+.env
+.env.local
+.vscode
+*.log
+# AWS CodePipeline Setup Guide
+
+This document provides instructions on how to set up AWS CodePipeline and CodeBuild for the Lekka Service project.
+
+## Prerequisites
+
+- AWS Account
+- GitHub repository
+- AWS CLI configured
+- kubectl configured for EKS cluster
+- Helm 3+ installed
+
+## Architecture Overview
+
+```
+GitHub Repository
+       ↓
+   CodePipeline Source Stage
+       ↓
+   CodeBuild (Build & Push to ECR)
+       ↓
+   ECR Repository
+       ↓
+   EKS Deployment
+```
+
+## Step 1: Create GitHub Personal Access Token
+
+1. Go to GitHub Settings → Developer settings → Personal access tokens
+2. Generate a new token with the following scopes:
+   - `repo` (full control of private repositories)
+   - `admin:repo_hook` (full control of repository hooks)
+3. Copy the token and save it securely
+
+## Step 2: Create ECR Repository
+
+```bash
+aws ecr create-repository \
+  --repository-name lekka-service \
+  --image-scanning-configuration scanOnPush=true \
+  --region us-east-1
+```
+
+## Step 3: Deploy CloudFormation Stack
+
+```bash
+aws cloudformation create-stack \
+  --stack-name lekka-service-pipeline \
+  --template-body file://codepipeline-template.yaml \
+  --parameters \
+    ParameterKey=GitHubRepo,ParameterValue=lekka-service-final \
+    ParameterKey=GitHubBranch,ParameterValue=main \
+    ParameterKey=GitHubToken,ParameterValue=YOUR_GITHUB_TOKEN \
+    ParameterKey=ECRRepositoryName,ParameterValue=lekka-service \
+    ParameterKey=EKSClusterName,ParameterValue=lekka-eks-cluster \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --region us-east-1
+```
+
+## Step 4: Update buildspec.yml
+
+Edit `buildspec.yml` and update the following:
+
+- `AWS_ACCOUNT_ID`: Your AWS Account ID
+- `AWS_DEFAULT_REGION`: Your AWS region (e.g., us-east-1)
+
+## Step 5: Configure Helm Chart
+
+### Update values.yaml
+
+Edit `helm/values.yaml` to configure:
+
+```yaml
+image:
+  repository: "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com/lekka-service"
+  tag: "latest"
+
+replicaCount: 2
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+```
+
+## Step 6: Deploy to EKS
+
+### Using Helm
+
+```bash
+# Create a namespace
+kubectl create namespace lekka-service
+
+# Add image pull secret for ECR (if needed)
+kubectl create secret docker-registry ecr-secret \
+  --docker-server=YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com \
+  --docker-username=AWS \
+  --docker-password=$(aws ecr get-authorization-token --output text --query 'authorizationData[0].authorizationToken' | base64 -d | cut -d: -f2) \
+  -n lekka-service
+
+# Deploy using Helm
+helm install lekka-service ./helm \
+  --namespace lekka-service \
+  --values helm/values.yaml
+```
+
+### Manual Deployment
+
+```bash
+kubectl apply -f helm/templates/ -n lekka-service
+```
+
+## Step 7: Verify Deployment
+
+```bash
+# Check deployment status
+kubectl get deployments -n lekka-service
+
+# Check pods
+kubectl get pods -n lekka-service
+
+# Check services
+kubectl get services -n lekka-service
+
+# View logs
+kubectl logs -f deployment/lekka-service -n lekka-service
+```
+
+## Environment Variables
+
+### CodeBuild Environment Variables
+
+The following environment variables are available in the build environment:
+
+- `AWS_ACCOUNT_ID`: Your AWS Account ID
+- `AWS_DEFAULT_REGION`: AWS Region
+- `ECR_REPOSITORY_NAME`: ECR Repository Name
+- `CODEBUILD_RESOLVED_SOURCE_VERSION`: Git commit SHA
+
+## BuildSpec Stages
+
+### pre_build
+- Authenticates with ECR
+- Sets up image repository names and tags
+
+### build
+- Builds Maven project
+- Builds Docker image
+- Pushes image to ECR
+- Creates image definitions file
+
+### post_build
+- Logs completion time
+
+## Helm Chart Structure
+
+```
+helm/
+├── Chart.yaml                 # Chart metadata
+├── values.yaml               # Default values
+├── templates/
+│   ├── deployment.yaml       # Kubernetes Deployment
+│   ├── service.yaml          # Kubernetes Service
+│   ├── serviceaccount.yaml   # Service Account
+│   ├── hpa.yaml             # Horizontal Pod Autoscaler
+│   ├── ingress.yaml         # Ingress configuration
+│   └── _helpers.tpl         # Template helpers
+```
+
+## Security Best Practices
+
+1. **Image Scanning**: ECR repository has image scanning enabled
+2. **Pod Security Context**:
+   - Runs as non-root user
+   - Read-only root filesystem
+   - Dropped Linux capabilities
+
+3. **Resource Limits**:
+   - CPU: 500m limit, 250m request
+   - Memory: 512Mi limit, 256Mi request
+
+4. **Health Checks**:
+   - Liveness probe on `/actuator/health/liveness`
+   - Readiness probe on `/actuator/health/readiness`
+
+5. **Pod Anti-Affinity**:
+   - Pods prefer to run on different nodes
+
+## Troubleshooting
+
+### Pipeline Fails at Build Stage
+
+1. Check CodeBuild logs:
+```bash
+aws logs tail /aws/codebuild/lekka-service --follow
+```
+
+2. Verify ECR repository exists and role has permissions
+
+### Image Push Fails
+
+1. Verify ECR authentication:
+```bash
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com
+```
+
+2. Check IAM role permissions for CodeBuild
+
+### EKS Deployment Fails
+
+1. Verify cluster credentials:
+```bash
+aws eks update-kubeconfig --region us-east-1 --name lekka-eks-cluster
+```
+
+2. Check image pull secrets
+
+3. Verify node capacity:
+```bash
+kubectl describe nodes
+```
+
+## Monitoring
+
+### CloudWatch Logs
+
+- CodeBuild logs: `/aws/codebuild/lekka-service`
+- EKS logs: `/aws/eks/lekka-eks-cluster/cluster`
+
+### Prometheus Metrics
+
+Service exposes Prometheus metrics at:
+- Endpoint: `/actuator/prometheus`
+- Port: 8080
+
+## Cleanup
+
+To delete the pipeline and resources:
+
+```bash
+# Delete CloudFormation stack
+aws cloudformation delete-stack \
+  --stack-name lekka-service-pipeline \
+  --region us-east-1
+
+# Delete Helm release
+helm uninstall lekka-service -n lekka-service
+
+# Delete namespace
+kubectl delete namespace lekka-service
+
+# Delete ECR repository (optional)
+aws ecr delete-repository \
+  --repository-name lekka-service \
+  --force \
+  --region us-east-1
+```
+
+## References
+
+- [AWS CodePipeline Documentation](https://docs.aws.amazon.com/codepipeline/)
+- [AWS CodeBuild Documentation](https://docs.aws.amazon.com/codebuild/)
+- [Amazon ECR Documentation](https://docs.aws.amazon.com/ecr/)
+- [Helm Documentation](https://helm.sh/docs/)
+- [Kubernetes Documentation](https://kubernetes.io/docs/)
+name: Build and Push to ECR
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: lekka-service
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v3
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build with Maven
+        run: mvn clean package -DskipTests
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      - name: Push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      - name: Generate image definitions file
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          printf '[{"name":"lekka-service","imageUri":"%s"}]' $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG > imagedefinitions.json
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-artifacts
+          path: |
+            imagedefinitions.json
+            helm/
+            pom.xml
+            Dockerfile
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for AWS CodePipeline with CodeBuild'
+
+Parameters:
+  GitHubRepo:
+    Type: String
+    Description: GitHub repository name
+    Default: lekka-service-final
+
+  GitHubBranch:
+    Type: String
+    Description: GitHub branch name
+    Default: main
+
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: GitHub personal access token
+
+  ECRRepositoryName:
+    Type: String
+    Description: ECR repository name
+    Default: lekka-service
+
+  EKSClusterName:
+    Type: String
+    Description: EKS cluster name
+    Default: lekka-eks-cluster
+
+Resources:
+  # IAM Role for CodePipeline
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+      Policies:
+        - PolicyName: CodePipelinePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+                Resource: !Sub '${ArtifactBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketVersioning
+                Resource: !GetAtt ArtifactBucket.Arn
+              - Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:BatchGetBuildBatches
+                  - codebuild:StartBuild
+                  - codebuild:StartBuildBatch
+                Resource: !GetAtt CodeBuildProject.Arn
+              - Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ECRRepositoryName}'
+
+  # IAM Role for CodeBuild
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+      Policies:
+        - PolicyName: CodeBuildPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+                Resource: !Sub '${ArtifactBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeRepositories
+                Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ECRRepositoryName}'
+
+  # S3 Bucket for Pipeline Artifacts
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'lekka-service-artifacts-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ECR Repository
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref ECRRepositoryName
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration:
+        EncryptionType: AES256
+
+  # CodeBuild Project
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: lekka-service-build
+      Description: Build and push Docker image to ECR
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: ECR_REPOSITORY_NAME
+            Value: !Ref ECRRepositoryName
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yml
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Sub '/aws/codebuild/lekka-service'
+
+  # CodePipeline
+  LekkaServicePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: lekka-service-pipeline
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: '1'
+              Configuration:
+                Owner: !Select [3, !Split ['/', !Sub 'https://github.com/your-org/${GitHubRepo}']]
+                Repo: !Ref GitHubRepo
+                Branch: !Ref GitHubBranch
+                OAuthToken: !Ref GitHubToken
+              OutputArtifacts:
+                - Name: SourceOutput
+
+        - Name: Build
+          Actions:
+            - Name: BuildAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+
+        - Name: DeployToEKS
+          Actions:
+            - Name: DeployAction
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: lekka-service-eks-deployment
+                TemplatePath: BuildOutput::helm-deployment.yaml
+                Capabilities: CAPABILITY_AUTO_EXPAND
+              InputArtifacts:
+                - Name: BuildOutput
+
+Outputs:
+  PipelineName:
+    Description: CodePipeline name
+    Value: !Ref LekkaServicePipeline
+    Export:
+      Name: !Sub '${AWS::StackName}-PipelineName'
+
+  ECRRepositoryUri:
+    Description: ECR Repository URI
+    Value: !GetAtt ECRRepository.RepositoryUri
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRRepositoryUri'
+
+  ArtifactBucketName:
+    Description: S3 Artifact Bucket name
+    Value: !Ref ArtifactBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-ArtifactBucket'
+
+  CodeBuildProjectName:
+    Description: CodeBuild Project name
+    Value: !Ref CodeBuildProject
+    Export:
+      Name: !Sub '${AWS::StackName}-CodeBuildProject'
+{{- if .Values.ingress.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "lekka-service.fullname" . }}
+  labels:
+    {{- include "lekka-service.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- range .Values.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "lekka-service.fullname" $ }}
+                port:
+                  number: {{ $.Values.service.port }}
+          {{- end }}
+    {{- end }}
+{{- end }}
+{{- if .Values.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "lekka-service.fullname" . }}
+  labels:
+    {{- include "lekka-service.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "lekka-service.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    {{- if .Values.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+    {{- end }}
+    {{- if .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+{{- end }}
+{{- if .Values.serviceAccount.create -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "lekka-service.serviceAccountName" . }}
+  labels:
+    {{- include "lekka-service.labels" . | nindent 4 }}
+  {{- with .Values.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lekka-service.fullname" . }}
+  labels:
+    {{- include "lekka-service.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "lekka-service.selectorLabels" . | nindent 4 }}
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - REPOSITORY_NAME="lekka-service"
+      - IMAGE_REPO_NAME=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$REPOSITORY_NAME
+      - IMAGE_TAG=${CODEBUILD_RESOLVED_SOURCE_VERSION}
+      - echo Build started on `date`
+      - echo Building Maven project...
+
+  build:
+    commands:
+      - echo Building the Docker image on `date`
+      - mvn clean package -DskipTests
+      - docker build -t $IMAGE_REPO_NAME:$IMAGE_TAG .
+      - docker tag $IMAGE_REPO_NAME:$IMAGE_TAG $IMAGE_REPO_NAME:latest
+      - echo Build completed on `date`
+      - echo Pushing the Docker image to ECR...
+      - docker push $IMAGE_REPO_NAME:$IMAGE_TAG
+      - docker push $IMAGE_REPO_NAME:latest
+      - echo Creating image definitions file...
+      - printf '[{"name":"lekka-service","imageUri":"%s"}]' $IMAGE_REPO_NAME:$IMAGE_TAG > imagedefinitions.json
+      - cat imagedefinitions.json
+
+  post_build:
+    commands:
+      - echo Build and Push completed on `date`
+
+artifacts:
+  files:
+    - imagedefinitions.json
+    - helm/**/*
+    - pom.xml
+    - Dockerfile
+  name: BuildArtifact
+
+cache:
+  paths:
+    - '/root/.m2/**/*'
+
+env:
+  variables:
+    AWS_ACCOUNT_ID: "123456789012"
+    AWS_DEFAULT_REGION: "us-east-1"
+

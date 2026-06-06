@@ -1,0 +1,17 @@
+apiVersion: v2
+name: lekka-service
+description: A Helm chart for deploying Lekka Service on Kubernetes
+type: application
+version: 1.0.0
+appVersion: "0.0.1"
+maintainers:
+  - name: DevOps Team
+    email: devops@example.com
+keywords:
+  - spring-boot
+  - microservice
+  - lekka
+home: https://github.com/nammane/lekka-service
+sources:
+  - https://github.com/nammane/lekka-service
+
