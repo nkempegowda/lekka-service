@@ -9,22 +9,24 @@ env:
 phases:
   pre_build:
     commands:
-      - echo "Login to ECR"
+      - echo "Logging in to Amazon ECR..."
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
       - IMAGE_REPO_NAME=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$REPOSITORY_NAME
-      - IMAGE_TAG=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | head -c 7)
+      - IMAGE_TAG=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
 
   build:
     commands:
-      - echo "Build JAR"
+      - echo "Building Maven project..."
       - mvn clean package -DskipTests
-      - echo "Build Docker image"
+      - echo "Listing target folder"
+      - ls -l target/
+      - echo "Building Docker image..."
       - docker build -t $IMAGE_REPO_NAME:$IMAGE_TAG .
       - docker tag $IMAGE_REPO_NAME:$IMAGE_TAG $IMAGE_REPO_NAME:latest
 
   post_build:
     commands:
-      - echo "Push image"
+      - echo "Pushing Docker images..."
       - docker push $IMAGE_REPO_NAME:$IMAGE_TAG
       - docker push $IMAGE_REPO_NAME:latest
       - printf '[{"name":"lekka-service","imageUri":"%s"}]' $IMAGE_REPO_NAME:$IMAGE_TAG > imagedefinitions.json
@@ -32,8 +34,3 @@ phases:
 artifacts:
   files:
     - imagedefinitions.json
-    - target/*.jar
-
-cache:
-  paths:
-    - '/root/.m2/**/*'
